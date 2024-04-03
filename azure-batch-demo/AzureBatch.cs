@@ -2,6 +2,7 @@
 using Microsoft.Azure.Batch;
 using Microsoft.Azure.Batch.Auth;
 using Microsoft.Azure.Batch.Common;
+using Microsoft.Identity.Client;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 
@@ -14,8 +15,8 @@ internal class AzureBatch
 
     // Batch account credentials
     private const string BatchAccountName = "***";
-    private const string BatchAccountKey = "****";
-    private const string BatchAccountUrl = "https://***.batch.azure.com";
+    private const string BatchAccountKey = "***";
+    private const string BatchAccountUrl = "https://***.***.batch.azure.com";
 
     // Storage account credentials
     private const string StorageAccountName = "***";
@@ -31,19 +32,34 @@ internal class AzureBatch
     private const string InputContainerName = "batch-ffmpeg-input";
     private const string OutputContainerName = "batch-ffmpeg-output";
 
+    /// //////////////////////////////////////////////////////////////////
+    //https://learn.microsoft.com/en-us/azure/batch/batch-aad-auth
+    //https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app#register-an-application
+
+    private const string AuthorityUri = "https://login.microsoftonline.com/****";
+    private const string BatchResourceUri = "https://batch.core.windows.net/";
+
+    private const string ClientId = "****";
+    private const string ClientKey = "****";
+    private const string ResourceAppId = "****";
+    private const string Subnet = $"/subscriptions/****/resourceGroups/****/providers/Microsoft.Network/virtualNetworks/****/subnets/*****";
+
+
+    /// ////////////////////////////////////////////////////////////////
+    /// </summary>
     // Application package Id and version
     // This assumes the Windows ffmpeg app package is already added to the Batch account with this Id and version. 
     // To add package to the Batch account, see https://docs.microsoft.com/azure/batch/batch-application-packages.
     const string appPackageId = "ffmpeg";
     const string appPackageVersion = "6.1.1";
 
-    public static void Start()
+    public static void Execute()
     {
-        if (string.IsNullOrEmpty(BatchAccountName) ||
-            string.IsNullOrEmpty(BatchAccountKey) ||
-            string.IsNullOrEmpty(BatchAccountUrl) ||
-            string.IsNullOrEmpty(StorageAccountName) ||
-            string.IsNullOrEmpty(StorageAccountKey))
+        if (String.IsNullOrEmpty(BatchAccountName) ||
+            String.IsNullOrEmpty(BatchAccountKey) ||
+            String.IsNullOrEmpty(BatchAccountUrl) ||
+            String.IsNullOrEmpty(StorageAccountName) ||
+            String.IsNullOrEmpty(StorageAccountKey))
         {
             throw new InvalidOperationException("One or more account credential strings have not been populated. Please ensure that your Batch and Storage account credentials have been specified.");
         }
@@ -72,6 +88,18 @@ internal class AzureBatch
             Console.WriteLine("Sample complete, hit ENTER to exit...");
             Console.ReadLine();
         }
+    }
+
+
+    public static async Task<string> GetAccessToken(string[] scopes)
+    {
+        var app = ConfidentialClientApplicationBuilder.Create(ClientId)
+                    .WithClientSecret(ClientKey)
+                    .WithAuthority(new Uri(AuthorityUri))
+                    .Build();
+
+        var result = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+        return result.AccessToken;
     }
 
     /// <summary>
@@ -117,13 +145,17 @@ internal class AzureBatch
         // the tasks will upload their output.
         string outputContainerSasUrl = GetContainerSasUrl(blobClient, OutputContainerName, SharedAccessBlobPermissions.Write);
 
+        //////////////////////////////////////////////////
+        var tokenProvider = await GetAccessToken(new string[] { $"{BatchResourceUri}/.default" });
+        /////////////////////////////////////////////////
 
         // CREATE BATCH CLIENT / CREATE POOL / CREATE JOB / ADD TASKS
         // Create a Batch client and authenticate with shared key credentials.
         // The Batch client allows the app to interact with the Batch service.
-        BatchSharedKeyCredentials sharedKeyCredentials = new BatchSharedKeyCredentials(BatchAccountUrl, BatchAccountName, BatchAccountKey);
 
-        using (BatchClient batchClient = BatchClient.Open(sharedKeyCredentials))
+        //BatchSharedKeyCredentials sharedKeyCredentials = new BatchSharedKeyCredentials(BatchAccountUrl, BatchAccountName, BatchAccountKey);
+        //using (BatchClient batchClient = BatchClient.Open(sharedKeyCredentials))
+        using (var batchClient = BatchClient.Open(new BatchTokenCredentials(BatchAccountUrl, tokenProvider)))
         {
             // Create the Batch pool, which contains the compute nodes that execute the tasks.
             await CreatePoolIfNotExistAsync(batchClient, PoolId);
@@ -300,10 +332,14 @@ internal class AzureBatch
                 virtualMachineSize: PoolVMSize,
                 virtualMachineConfiguration: virtualMachineConfiguration);
 
-            //pool.NetworkConfiguration = new NetworkConfiguration
-            //{
-            //    SubnetId = "default",
-            //};
+
+            pool.NetworkConfiguration = new NetworkConfiguration
+            {
+
+                SubnetId = Subnet,
+            };
+
+
             // Specify the application and version to install on the compute nodes
             // This assumes that a Windows 64-bit zipfile of ffmpeg has been added to Batch account
             // with Application Id of "ffmpeg" and Version of "4.3.1".
@@ -379,10 +415,10 @@ internal class AzureBatch
             // Note that ffmpeg syntax specifies the format as the file extension of the input file
             // and the output file respectively. In this case inputs are MP4.
             string appPath = string.Format("%AZ_BATCH_APP_PACKAGE_{0}#{1}%", appPackageId, appPackageVersion);
-            
+
             string inputMediaFile = inputFiles[i].StorageContainerUrl; //string inputMediaFile = inputFiles[i].FilePath; //CHANGED since its NUUUULL
             string outputMediaFile = string.Format("{0}{1}", System.IO.Path.GetFileNameWithoutExtension(inputMediaFile), ".mp3");
-            string taskCommandLine = string.Format("cmd /c {0}\\ffmpeg-6.1.1\\ffmpeg-6.1.1\\bin\\ffmpeg.exe -i {1} {2}", appPath, inputMediaFile, outputMediaFile);
+            string taskCommandLine = string.Format("cmd /c {0}\\ffmpeg-6.1.1\\bin\\ffmpeg.exe -i {1} {2}", appPath, inputMediaFile, outputMediaFile);
 
             // Create a cloud task (with the task ID and command line) and add it to the task list
             CloudTask task = new CloudTask(taskId, taskCommandLine);
